@@ -1,0 +1,2 @@
+model folder link: https://huggingface.co/param2004/Medilingua-model
+dataset folder link: https://huggingface.co/param2004/Medilingua-dataset
