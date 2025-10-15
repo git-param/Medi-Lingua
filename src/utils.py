@@ -1,66 +1,90 @@
 import streamlit as st
 import pickle
 import pandas as pd
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, models
 import torch
 import numpy as np
-from src.search import init_faiss, init_tfidf
+from src.search import init_faiss
+import os
+
+BASE_DIR = os.path.dirname(__file__)  # src/
+QUESTION_EMB_PATH = os.path.join(BASE_DIR, "..", "dataset", "question_embeddings.pkl")
+DOCTOR_EMB_PATH = os.path.join(BASE_DIR, "..", "dataset", "doctor_embeddings.pkl")
+DATASET_CSV_PATH = os.path.join(BASE_DIR, "..", "dataset", "dataset.csv")
+
 
 @st.cache_resource
 def load_model():
-    """Load the medical Sentence Transformer model (SapBERT)."""
+    """Load the SapBERT model properly from a local folder."""
+    import torch
+    from transformers import AutoTokenizer, AutoModel
+    from sentence_transformers import SentenceTransformer, models
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model_name = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
-    st.info(f"🔬 Loading model: {model_name} on {device.upper()}")
-    model = SentenceTransformer(model_name, device=device)
+
+    # 👇 Local model path instead of downloading from Hugging Face
+    model_name = "models/SapBERT-from-PubMedBERT-fulltext"
+    st.info(f"🔬 Loading SapBERT locally from '{model_name}' on {device.upper()}...")
+
+    try:
+        # Load the Transformer + Pooling manually for full control
+        word_embedding_model = models.Transformer(model_name)
+        pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension())
+        model = SentenceTransformer(modules=[word_embedding_model, pooling_model], device=device)
+        st.success("✅ SapBERT (local) loaded successfully.")
+    except Exception as e:
+        st.error(f"❌ Failed to load SapBERT locally. Details: {e}")
+        st.warning("⚠️ Falling back to 'all-MiniLM-L6-v2' model (general-purpose).")
+        model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+
     return model
+
 
 @st.cache_resource
 def load_data():
     """
-    Loads SapBERT-based question embeddings and the corresponding original dataset.
-    Also initializes FAISS and TF-IDF for fast hybrid search.
+    Loads embeddings and the corresponding dataset.
+    Returns a dictionary with description+patient embeddings, doctor embeddings, and text columns.
     """
     try:
-        # --- Load embeddings ---
-        with open('dataset/question_embeddings.pkl', 'rb') as f:
-            embedding_data = pickle.load(f)
-        embeddings = embedding_data.get('embeddings')
-        embeddings = embeddings.astype('float32')  # FAISS requires float32
-        num_embeddings = embeddings.shape[0]
+        # --- Load question embeddings ---
+        
+        with open(QUESTION_EMB_PATH, 'rb') as f:
+            question_data = pickle.load(f)
+        question_embeddings = question_data.get('embeddings').astype('float32')
 
-        # --- Load original dataset ---
-        original_df = pd.read_csv('dataset/dataset.csv')
-        original_df.dropna(subset=['Description', 'Patient', 'Doctor'], inplace=True)
-        original_df.drop_duplicates(inplace=True)
+        # --- Load doctor embeddings ---
+        with open(DOCTOR_EMB_PATH, 'rb') as f:
+            doctor_data = pickle.load(f)
+        doctor_embeddings = doctor_data.get('embeddings').astype('float32')
 
-        # Trim to match embeddings
-        original_df = original_df.iloc[:num_embeddings]
-        original_answers = original_df['Doctor'].tolist()
-        patient_column = original_df['Patient'].tolist()
-        description_column = original_df['Description'].tolist()
+        # --- Load dataset ---
+        df = pd.read_csv('dataset/dataset.csv')
+        df.dropna(subset=['Description', 'Patient', 'Doctor'], inplace=True)
+        df.drop_duplicates(inplace=True)
 
-        # --- Initialize hybrid search ---
-        corpus_texts = [p + " " + d for p, d in zip(patient_column, description_column)]
-        init_tfidf(corpus_texts)
-        init_faiss(embeddings)
+        # Ensure all arrays align
+        num_samples = min(len(df), len(question_embeddings), len(doctor_embeddings))
+        df = df.iloc[:num_samples]
+        question_embeddings = question_embeddings[:num_samples]
+        doctor_embeddings = doctor_embeddings[:num_samples]
 
-        # --- Runtime checks ---
-        st.write(f"✅ Loaded embeddings: {embeddings.shape}")
-        if embeddings.shape[1] != 768:
-            st.warning(
-                f"⚠️ Embedding dimension is {embeddings.shape[1]}, expected 768 for SapBERT."
-            )
+        # No normalization — already normalized before saving
+        st.success(f"✅ Loaded {num_samples} rows with SapBERT embeddings ({question_embeddings.shape[1]} dims)")
+
+        # Initialize FAISS with question embeddings for retrieval
+        init_faiss(question_embeddings)
 
         return {
-            "embeddings": embeddings,
-            "original_answers": original_answers,
-            "patient_column": patient_column,
-            "description_column": description_column
+            "question_embeddings": question_embeddings,
+            "doctor_embeddings": doctor_embeddings,
+            "description_column": df["Description"].tolist(),
+            "patient_column": df["Patient"].tolist(),
+            "original_answers": df["Doctor"].tolist(),
         }
 
     except FileNotFoundError as e:
-        st.error(f"❌ Data file not found. Details: {e}")
+        st.error(f"❌ Embedding/data file not found. Details: {e}")
         return None
     except Exception as e:
         st.error(f"❌ Error while loading data: {e}")
